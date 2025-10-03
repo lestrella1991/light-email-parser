@@ -31,7 +31,7 @@ EXPOSE 5000
 
 # Healthcheck (opcional, requiere curl en la imagen)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://192.168.178.139:5000/ || exit 1
+  CMD curl -f http://0.0.0.0:5000/ || exit 1
 
 # Ejecutar con Gunicorn (3 workers por defecto; ajustá según CPU)
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "3", "app:app"]
