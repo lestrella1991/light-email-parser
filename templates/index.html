@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Email Parser</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  
+</head>
+<body>
+  <div class="container">
+    <h2>Email Parser</h2>
+
+    <!-- Drop area -->
+    <div id="drop-area">
+      <form id="upload-form">
+        <p>Arrastrá archivos acá o hacé click</p>
+        <!-- <- important: multiple si querés varios archivos -->
+        <input type="file" id="fileElem" accept=".eml" multiple />
+        <label class="button" for="fileElem">Seleccionar archivos</label>
+      </form>
+    </div>
+
+    <!-- Lista de archivos y progreso -->
+    <div id="gallery"></div>
+
+    <!-- Resultado JSON (debug) -->
+    <pre id="result" style="display:none; white-space: pre-wrap;"></pre>
+  </div>
+
+<script>
+(function(){
+  const dropArea = document.getElementById('drop-area');
+  const fileInput = document.getElementById('fileElem');
+  const gallery = document.getElementById('gallery');
+  const resultEl = document.getElementById('result'); // lo dejamos para debug, pero oculto
+
+  ;['dragenter','dragover','dragleave','drop'].forEach(evt => {
+    dropArea.addEventListener(evt, preventDefaults, false);
+  });
+
+  function preventDefaults(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  ;['dragenter','dragover'].forEach(evt => {
+    dropArea.addEventListener(evt, () => dropArea.classList.add('highlight'), false);
+  });
+
+  ;['dragleave','drop'].forEach(evt => {
+    dropArea.addEventListener(evt, () => dropArea.classList.remove('highlight'), false);
+  });
+
+  dropArea.addEventListener('drop', handleDrop, false);
+  fileInput.addEventListener('change', handleFilesSelected, false);
+
+  function handleFilesSelected(e){
+    const files = Array.from(e.target.files);
+    handleFiles(files);
+  }
+
+  function handleDrop(e){
+    const dt = e.dataTransfer;
+    const files = Array.from(dt.files);
+    handleFiles(files);
+  }
+
+  function handleFiles(files){
+    // gallery.innerHTML = ''; // opcional: no borrar todo para mantener historial
+    files.forEach(uploadFileWithProgress);
+  }
+
+  function uploadFileWithProgress(file){
+    const url = '/upload';
+    const formData = new FormData();
+    formData.append('files[]', file);
+
+    // UI card (con espacio para body, attachments y urls)
+    const card = document.createElement('div');
+    card.className = 'file-card';
+    card.innerHTML = `
+      <div class="email-card">
+        <div class="email-header">
+          <div class="subject"><span class="label">Asunto:</span> <span class="subject-val">Cargando ${escapeHtml(file.name)}</span></div>
+          <div class="from-to">
+            <span class="from">Desde: <strong class="from-val">—</strong></span>
+            <span class="to">A: <strong class="to-val">—</strong></span>
+            <span class="date"><small class="date-val">—</small></span>
+          </div>
+        </div>
+
+        <div class="progress"><div class="bar" style="width:0%"></div></div>
+        <div class="status">0%</div>
+
+        <div class="email-preview" style="display:none;">
+          <div class="preview-body"></div>
+          <div class="attachments" style="display:none;">
+            <strong>Adjuntos</strong>
+            <ul class="attachments-list"></ul>
+          </div>
+          <div class="extracted-urls" style="display:none; margin-top:10px;">
+            <strong>URLs extraídas</strong>
+            <ul class="urls-list"></ul>
+          </div>
+        </div>
+
+        <div class="details" style="margin-top:8px; display:none;"></div>
+      </div>
+    `;
+    gallery.appendChild(card);
+
+    const bar = card.querySelector('.bar');
+    const status = card.querySelector('.status');
+    const details = card.querySelector('.details');
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+
+    xhr.upload.addEventListener('progress', function(e){
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded / e.total) * 100);
+        bar.style.width = percent + '%';
+        status.textContent = percent + '%';
+      }
+    });
+
+    xhr.onerror = function(){
+      status.textContent = 'Error de red';
+      details.style.display = 'block';
+      details.textContent = 'Error de red al subir, revisá consola/Network';
+    };
+
+    xhr.onreadystatechange = function(){
+      if (xhr.readyState === 4) {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          status.textContent = 'Subido ✓';
+          // parseamos la respuesta JSON
+          try {
+            const json = JSON.parse(xhr.responseText);
+            // asumimos structure: { results: [ { ... } ] }
+            const first = (json.results && json.results[0]) ? json.results[0] : json;
+            // mostramos el preview en la card
+            renderResultInCard(first, details);
+            // ocultamos debug JSON (si lo querés mostrar, podés usar resultEl)
+            resultEl.style.display = 'none';
+            resultEl.textContent = '';
+          } catch (err) {
+            details.style.display = 'block';
+            details.textContent = xhr.responseText;
+          }
+        } else {
+          status.textContent = 'Error: ' + xhr.status;
+          details.style.display = 'block';
+          details.textContent = 'Error response:\\n' + xhr.responseText;
+        }
+      }
+    };
+
+    xhr.send(formData);
+  }
+
+  // Convierte HTML a texto limpio (preserva saltos) sin mostrar tags
+  function htmlToText(html){
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html || '';
+    // innerText conserva saltos de línea de bloques
+    return tmp.innerText || tmp.textContent || '';
+  }
+
+  // Renderiza el resultado en la card: body plano + lista de adjuntos + urls
+  function renderResultInCard(res, detailsEl){
+    const card = detailsEl.closest('.file-card');
+    const preview = card.querySelector('.email-preview');
+    const bodyEl = card.querySelector('.preview-body');
+    const fromVal = card.querySelector('.from-val');
+    const toVal = card.querySelector('.to-val');
+    const dateVal = card.querySelector('.date-val');
+    const attachmentsBlock = card.querySelector('.attachments');
+    const attachmentsList = card.querySelector('.attachments-list');
+    const urlsBlock = card.querySelector('.extracted-urls');
+    const urlsList = card.querySelector('.urls-list');
+
+    // ocultar detalles raw y mostrar preview
+    detailsEl.style.display = 'none';
+    preview.style.display = 'block';
+
+    // header fields (mostrar tal cual vienen)
+    fromVal.textContent = res.from || '—';
+    toVal.textContent = res.to || '—';
+    dateVal.textContent = res.date || '';
+
+    // subject
+    const subj = res.subject || res['subject'] || '';
+    if(subj){
+      const subjectEl = card.querySelector('.subject');
+      subjectEl.innerHTML = `<span class="label">Asunto:</span> <span class="subject-val">${escapeHtml(subj)}</span>`;
+    }
+
+    // BODY: si viene html, lo transformamos a texto limpio; si viene body texto lo usamos
+    let bodyText = '';
+    if (res.html && typeof res.html === 'string' && res.html.trim().length) {
+      bodyText = htmlToText(res.html);
+    } else if (res.body && typeof res.body === 'string') {
+      bodyText = res.body;
+    } else if (res['texto'] && typeof res['texto'] === 'string') {
+      // si tu backend usa "texto"
+      bodyText = res['texto'];
+    } else {
+      bodyText = '(sin cuerpo)';
+    }
+    // mostrar texto con saltos
+    bodyEl.textContent = bodyText;
+
+    // Adjuntos
+    if (res.attachments && Array.isArray(res.attachments) && res.attachments.length) {
+      attachmentsList.innerHTML = '';
+      res.attachments.forEach(a => {
+        const li = document.createElement('li');
+        const name = a.filename || a.name || (typeof a === 'string' ? a : 'adjunto');
+        // si querés linkear al archivo guardado en /uploads/
+        const link = `/uploads/${encodeURIComponent(name)}`;
+        li.innerHTML = `${escapeHtml(name)}`;
+        
+        attachmentsList.appendChild(li);
+      });
+      attachmentsBlock.style.display = 'block';
+    } else {
+      attachmentsBlock.style.display = 'none';
+    }
+
+    // URLs extraídas: buscamos en varios lugares (top-level, attachments[].url(s))
+    // helper: normaliza un valor que puede ser "a,b,c" o "http...,..." o un array, y añade cada url al Set
+function normalizeAndAdd(val, set) {
+  if (!val) return;
+  // si viene array
+  if (Array.isArray(val)) {
+    val.forEach(v => normalizeAndAdd(v, set));
+    return;
+  }
+  // split por comas (y por saltos si acaso)
+  const parts = String(val).split(/[,;\n\r]+/);
+  parts.forEach(p => {
+    let u = p.trim().replace(/^['"]|['"]$/g,''); // trim y quita comillas
+    if (!u) return;
+    // si no tiene scheme pero parece dominio, agrego https://
+    if (!/^https?:\/\//i.test(u)) {
+      if (/^www\./i.test(u) || /\./.test(u)) {
+        u = 'https://' + u;
+      }
+    }
+    // final sanity: añadir si queda algo
+    if (u) set.add(u);
+  });
+}
+
+// ---- reemplaza la lógica antigua por esta ----
+const found = new Set();
+
+// top-level
+normalizeAndAdd(res.url, found);
+normalizeAndAdd(res.urls, found);
+
+// attachments
+if (res.attachments && Array.isArray(res.attachments)) {
+  res.attachments.forEach(a => {
+    normalizeAndAdd(a.url, found);
+    normalizeAndAdd(a.urls, found);
+    // si attachment viene como string (caso raro)
+    normalizeAndAdd(a, found);
+  });
+}
+
+// convertir a array, ordenar y renderizar
+const urlArr = Array.from(found).filter(Boolean).sort();
+
+
+
+if (urlArr.length) {
+  urlsList.innerHTML = '';
+  urlArr.forEach(u => {
+    const li = document.createElement('li');
+    // escape mínimo para href (usamos tu escapeHtml)
+    
+    const text = escapeHtml(u);
+    li.innerHTML = `${text}`;
+    urlsList.appendChild(li);
+  });
+  urlsBlock.style.display = 'block';
+} else {
+  urlsBlock.style.display = 'none';
+}
+
+  }
+
+  function escapeHtml(text) {
+    if (!text) return '';
+    return String(text).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; });
+  }
+
+})();
+</script>
+
+
+</body>
+</html>
